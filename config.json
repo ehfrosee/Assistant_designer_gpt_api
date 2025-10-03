@@ -1,0 +1,31 @@
+{
+  "knowledge_base": {
+    "name": "Проектная документация",
+    "description": "База знаний по проектной документации строительных объектов",
+    "data_path": "./data",
+    "index_path": "./knowledge_base.faiss",
+    "extensions": ["md", "txt", "pdf"],
+    "chunk_size": 2500,
+    "chunk_overlap": 250
+  },
+  "gpt": {
+    "model": "gpt-4o-mini",
+    "max_tokens": 1500,
+    "temperature": 0.1
+  },
+  "embedding": {
+    "model": "text-embedding-ada-002"
+  },
+  "logging": {
+    "enabled": true,
+    "log_file": "assistant.log",
+    "level": "INFO"
+  },
+  "telegram_bot": {
+    "admin_ids": [1961734606]
+  },
+  "api": {
+    "host": "0.0.0.0",
+    "port": 5000
+  }
+}
