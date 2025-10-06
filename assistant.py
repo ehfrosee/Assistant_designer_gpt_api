@@ -264,6 +264,9 @@ class Assistant:
         self.gpt_temperature = self.config['gpt']['temperature']
         self.embedding_model = self.config['embedding']['model']
         
+        # Параметр количества релевантных документов для поиска
+        self.search_k = self.config['knowledge_base'].get('search_k', 5)
+        
         # Инициализация компонентов
         self.processor = DocumentProcessor(
             chunk_size=self.config['knowledge_base']['chunk_size'],
@@ -371,8 +374,8 @@ class Assistant:
             # Логируем вопрос
             logging.info(f"Вопрос: {question}")
             
-            # Поиск релевантных документов
-            relevant_docs = self.knowledge_base.search(question, k=5)
+            # Поиск релевантных документов с параметром k из конфига
+            relevant_docs = self.knowledge_base.search(question, k=self.search_k)
             
             if not relevant_docs:
                 response = {
@@ -490,7 +493,8 @@ class Assistant:
             'index_path': self.config['knowledge_base']['index_path'],
             'status': 'loaded' if self.knowledge_base.index else 'empty',
             'gpt_model': self.gpt_model,
-            'embedding_model': self.embedding_model
+            'embedding_model': self.embedding_model,
+            'search_k': self.search_k  # Добавляем информацию о параметре поиска
         }
     
     def rebuild_knowledge_base(self) -> Dict[str, Any]:

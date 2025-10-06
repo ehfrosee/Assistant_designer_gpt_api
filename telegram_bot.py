@@ -15,6 +15,8 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
+from dialog_manager import DialogManager, Dialog
+
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -31,31 +33,25 @@ class UserSession:
     user_id: int
     username: Optional[str] = None
     first_name: Optional[str] = None
-    question_history: List[Dict] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
-    
-    def add_question(self, question: str, answer: str, tokens_used: int, sources: List[Dict]):
-        """Добавить вопрос в историю"""
-        self.question_history.append({
-            'timestamp': datetime.now(),
-            'question': question,
-            'answer': answer,
-            'tokens_used': tokens_used,
-            'sources': sources
-        })
-        
-        # Ограничиваем историю последними 50 вопросами
-        if len(self.question_history) > 50:
-            self.question_history = self.question_history[-50:]
 
 class NeuroConsultantBot:
     """Класс Telegram бота для нейро-консультанта"""
     
-    def __init__(self, token: str, config_path: str = "config.json"):
+    def __init__(self, token: str, config_path: str = "config.json", templates_path: str = "templates.json"):
         self.token = token
         self.application = Application.builder().token(token).build()
         self.user_sessions: Dict[int, UserSession] = {}
         self.admin_ids = self._load_admin_ids(config_path)
+        self.templates = self._load_templates(templates_path)
+        
+        # Загружаем настройки диалогов из конфига
+        dialog_settings = self._load_dialog_settings(config_path)
+        self.dialog_manager = DialogManager(
+            storage_path="dialogs",
+            max_messages=dialog_settings['max_messages'],
+            max_dialogs=dialog_settings['max_dialogs']
+        )
         
         # Регистрация обработчиков
         self._setup_handlers()
@@ -86,6 +82,49 @@ class NeuroConsultantBot:
             logger.error(f"Ошибка загрузки admin_ids: {e}, используются admin_ids по умолчанию")
             return [1961734606]
     
+    def _load_dialog_settings(self, config_path: str) -> Dict:
+        """Загрузка настроек диалогов из config.json"""
+        default_settings = {
+            'max_messages': 10,
+            'max_dialogs': 50
+        }
+        
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            telegram_config = config.get('telegram_bot', {})
+            return {
+                'max_messages': telegram_config.get('max_messages_per_dialog', default_settings['max_messages']),
+                'max_dialogs': telegram_config.get('max_dialogs_per_user', default_settings['max_dialogs'])
+            }
+        except Exception as e:
+            logger.error(f"Ошибка загрузки настроек диалогов: {e}, используются настройки по умолчанию")
+            return default_settings
+    
+    def _load_templates(self, templates_path: str) -> Dict:
+        """Загрузка шаблонов сообщений"""
+        try:
+            with open(templates_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            logger.error(f"Файл шаблонов {templates_path} не найден")
+            return {}
+        except json.JSONDecodeError as e:
+            logger.error(f"Ошибка чтения шаблонов: {e}")
+            return {}
+        except Exception as e:
+            logger.error(f"Ошибка загрузки шаблонов: {e}")
+            return {}
+    
+    def _get_template(self, category: str, key: str, default: str = "") -> str:
+        """Получение шаблона по категории и ключу"""
+        try:
+            return self.templates.get(category, {}).get(key, default)
+        except Exception as e:
+            logger.error(f"Ошибка получения шаблона {category}.{key}: {e}")
+            return default
+    
     def _is_admin(self, user_id: int) -> bool:
         """Проверка, является ли пользователь администратором"""
         return user_id in self.admin_ids
@@ -100,6 +139,9 @@ class NeuroConsultantBot:
         self.application.add_handler(CommandHandler("clear", self._clear_command))
         self.application.add_handler(CommandHandler("summarize", self._summarize_command))
         self.application.add_handler(CommandHandler("rebuild", self._rebuild_command))
+        self.application.add_handler(CommandHandler("new", self._new_dialog_command))
+        self.application.add_handler(CommandHandler("save", self._save_dialog_command))
+        self.application.add_handler(CommandHandler("dialogs", self._list_dialogs_command))
         
         # Обработчик callback запросов (кнопки)
         self.application.add_handler(CallbackQueryHandler(self._button_handler))
@@ -223,6 +265,9 @@ class NeuroConsultantBot:
         user = update.message.from_user
         session = self._get_user_session(user.id, user.username, user.first_name)
         
+        # Создаем новый диалог при старте
+        dialog = self.dialog_manager.start_new_dialog(user.id, "Начало работы")
+        
         # Проверяем доступность API и базы знаний
         health_data = self._make_api_request("GET", "/health")
         kb_info = self._make_api_request("GET", "/knowledge-base/info")
@@ -244,60 +289,132 @@ class NeuroConsultantBot:
             gpt_model = "Unknown"
             embedding_model = "Unknown"
         
-        welcome_text = f"""
-<b>🤖 Добро пожаловать в нейро-консультант по проектной документации!</b>
-
-{api_status}
-{kb_status}
-
-<b>Модели:</b>
-• GPT: {gpt_model}
-• Эмбеддинги: {embedding_model}
-
-Я помогу вам найти ответы на вопросы по проектной документации. Просто задайте вопрос, и я найду relevantную информацию в базе знаний.
-
-<b>Основные команды:</b>
-/info - Информация о базе знаний
-/stats - Статистика ваших запросов
-/summarize - Суммаризировать историю диалога
-/clear - Очистить историю вопросов
-/rebuild - Перестроить базу знаний (админ)
-/help - Справка по использованию
-
-<b>Примеры вопросов:</b>
-• Какие требования к пожарной сигнализации?
-• Перечислите используемые материалы
-• Опишите структуру системы электроснабжения
-        """
+        welcome_text = self._get_template('start', 'welcome').format(
+            api_status=api_status,
+            kb_status=kb_status,
+            gpt_model=gpt_model,
+            embedding_model=embedding_model
+        )
+        
+        # Добавляем информацию о диалоге
+        dialog_info = f"\n\n<b>💬 Активный диалог:</b> {dialog.topic}\nДля начала новой темы используйте /new"
+        welcome_text += dialog_info
         
         await self._safe_reply_text(update, welcome_text, parse_mode='HTML')
     
+    async def _new_dialog_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /new - начать новый диалог"""
+        user = update.message.from_user
+        
+        # Получаем тему из аргументов команды
+        topic = " ".join(context.args) if context.args else "Новая тема"
+        
+        # Создаем новый диалог
+        dialog = self.dialog_manager.start_new_dialog(user.id, topic)
+        
+        response_text = f"""
+<b>💬 Начата новая тема</b>
+
+<b>Тема:</b> {self._escape_html(topic)}
+<b>ID диалога:</b> {dialog.dialog_id}
+
+Теперь вы можете задавать вопросы по новой теме.
+Для сохранения диалога используйте /save
+        """
+        
+        await self._safe_reply_text(update, response_text, parse_mode='HTML')
+    
+    async def _save_dialog_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /save - сохранить текущий диалог"""
+        user = update.message.from_user
+        
+        dialog = self.dialog_manager.get_active_dialog(user.id)
+        if not dialog or len(dialog.messages) == 0:
+            await update.message.reply_text("❌ Нет активного диалога для сохранения")
+            return
+        
+        # Создаем summary если его нет
+        if not dialog.summary and len(dialog.messages) > 1:
+            # Формируем текст для суммаризации
+            dialog_text = ""
+            for msg in dialog.messages:
+                role = "Пользователь" if msg.role == 'user' else "Ассистент"
+                dialog_text += f"{role}: {msg.content}\n\n"
+            
+            # Отправляем на суммаризацию
+            summary_data = self._make_api_request("POST", "/summarize", json={"dialog": dialog_text})
+            if summary_data:
+                dialog.summary = summary_data['summary']
+                self.dialog_manager.update_summary(user.id, dialog.summary)
+        
+        # Экспортируем диалог в текстовый формат
+        dialog_text = self.dialog_manager.export_dialog_text(dialog)
+        
+        # Сохраняем во временный файл
+        filename = f"dialog_{user.id}_{dialog.dialog_id}.txt"
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(dialog_text)
+            
+            # Отправляем файл пользователю
+            with open(filename, 'rb') as f:
+                await update.message.reply_document(
+                    document=f,
+                    filename=f"Диалог_{dialog.dialog_id}.txt",
+                    caption=f"💾 Сохранен диалог: {dialog.topic}"
+                )
+            
+            # Удаляем временный файл
+            os.remove(filename)
+            
+        except Exception as e:
+            logger.error(f"Ошибка сохранения диалога: {e}")
+            await update.message.reply_text("❌ Ошибка при сохранении диалога")
+    
+    async def _list_dialogs_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /dialogs - список диалогов"""
+        user = update.message.from_user
+        
+        dialogs = self.dialog_manager.get_user_dialogs(user.id)
+        if not dialogs:
+            await update.message.reply_text("📂 У вас пока нет сохраненных диалогов")
+            return
+        
+        response_text = "<b>📂 Ваши диалоги:</b>\n\n"
+        
+        for i, dialog in enumerate(dialogs[:10], 1):  # Показываем последние 10 диалогов
+            created_date = datetime.fromisoformat(dialog.created_at).strftime('%d.%m.%Y %H:%M')
+            active_indicator = " 🔵" if dialog.is_active else ""
+            
+            response_text += f"{i}. <b>{self._escape_html(dialog.topic)}</b>\n"
+            response_text += f"   📅 {created_date}{active_indicator}\n"
+            if dialog.summary:
+                summary_preview = dialog.summary[:100] + "..." if len(dialog.summary) > 100 else dialog.summary
+                response_text += f"   📝 {self._escape_html(summary_preview)}\n"
+            response_text += "\n"
+        
+        response_text += "Для загрузки диалога используйте /save в активном диалоге"
+        
+        await self._safe_reply_text(update, response_text, parse_mode='HTML')
+    
     async def _help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик команды /help"""
-        help_text = """
-<b>📖 Справка по использованию бота</b>
-
-<b>Как работать с ботом:</b>
-
-1. <i>Задавайте вопросы</i> - просто напишите ваш вопрос по проектной документации
-2. <i>Получайте ответы</i> - бот найдет relevantную информацию в базе знаний
-3. <i>Изучайте источники</i> - каждый ответ содержит ссылки на исходные документы
-
-<b>Команды:</b>
-/start - Начать работу с ботом
-/info - Информация о базе знаний
-/stats - Статистика ваших запросов
-/summarize - Суммаризировать историю диалога
-/clear - Очистить историю вопросов
-/rebuild - Перестроить базу знаний (только для администраторов)
-/help - Эта справка
-
-<b>Особенности:</b>
-• Бот использует только информацию из загруженных документов
-• Каждый ответ содержит оценку достоверности
-• История вопросов сохраняется в течение сессии
-• База знаний автоматически сохраняется и загружается
+        help_text = (
+            self._get_template('help', 'title') + "\n\n" +
+            self._get_template('help', 'usage') + "\n\n" +
+            self._get_template('help', 'commands') + "\n\n" +
+            self._get_template('help', 'features')
+        )
+        
+        # Добавляем команды управления диалогами
+        dialog_commands = """
+<b>Команды управления диалогами:</b>
+/new [тема] - Начать новую тему
+/save - Сохранить текущий диалог
+/dialogs - Показать список диалогов
         """
+        
+        help_text += dialog_commands
         
         await self._safe_reply_text(update, help_text, parse_mode='HTML')
     
@@ -306,24 +423,19 @@ class NeuroConsultantBot:
         kb_info = self._make_api_request("GET", "/knowledge-base/info")
         
         if not kb_info:
-            await update.message.reply_text("❌ Не удалось получить информацию о базе знаний")
+            await update.message.reply_text(self._get_template('errors', 'no_kb_info'))
             return
         
-        info_text = f"""
-<b>📚 Информация о базе знаний</b>
-
-<b>Название:</b> {self._escape_html(kb_info.get('name', 'Не указано'))}
-<b>Описание:</b> {self._escape_html(kb_info.get('description', 'Не указано'))}
-<b>Путь к данным:</b> {self._escape_html(kb_info.get('data_path', 'Не указан'))}
-<b>Файл индекса:</b> {self._escape_html(kb_info.get('index_path', 'Не указан'))}
-<b>Количество документов:</b> {kb_info.get('documents_count', 0)}
-<b>Статус:</b> {kb_info.get('status', 'unknown')}
-<b>GPT модель:</b> {self._escape_html(kb_info.get('gpt_model', 'Не указана'))}
-<b>Модель эмбеддингов:</b> {self._escape_html(kb_info.get('embedding_model', 'Не указана'))}
-
-База знаний автоматически загружается при запуске системы.
-Для перестроения базы используйте команду /rebuild
-        """
+        info_text = self._get_template('info', 'template').format(
+            name=self._escape_html(kb_info.get('name', 'Не указано')),
+            description=self._escape_html(kb_info.get('description', 'Не указано')),
+            data_path=self._escape_html(kb_info.get('data_path', 'Не указан')),
+            index_path=self._escape_html(kb_info.get('index_path', 'Не указан')),
+            documents_count=kb_info.get('documents_count', 0),
+            status=kb_info.get('status', 'unknown'),
+            gpt_model=self._escape_html(kb_info.get('gpt_model', 'Не указана')),
+            embedding_model=self._escape_html(kb_info.get('embedding_model', 'Не указана'))
+        )
         
         # Создаем клавиатуру с кнопками
         keyboard = [
@@ -337,102 +449,70 @@ class NeuroConsultantBot:
     async def _stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик команды /stats - статистика пользователя"""
         user = update.message.from_user
-        session = self._get_user_session(user.id)
         
-        total_questions = len(session.question_history)
-        total_tokens = sum(qa.get('tokens_used', 0) for qa in session.question_history)
+        # Получаем все диалоги пользователя
+        dialogs = self.dialog_manager.get_user_dialogs(user.id)
+        total_dialogs = len(dialogs)
         
-        if total_questions == 0:
-            await update.message.reply_text("📊 Вы еще не задавали вопросов")
-            return
-        
-        # Анализ источников
-        source_stats = {}
-        for qa in session.question_history:
-            for source in qa.get('sources', []):
-                source_name = source.get('source', 'Unknown')
-                source_stats[source_name] = source_stats.get(source_name, 0) + 1
-        
-        common_sources = sorted(source_stats.items(), key=lambda x: x[1], reverse=True)[:3]
-        sources_text = ", ".join([f"{self._escape_html(source)}({count})" for source, count in common_sources])
-        
-        # Средняя релевантность
-        avg_relevance = 0
-        relevance_count = 0
-        for qa in session.question_history:
-            for source in qa.get('sources', []):
-                relevance = source.get('relevance_score', 0)
-                if relevance:
-                    avg_relevance += relevance
-                    relevance_count += 1
-        
-        avg_relevance_pct = int((avg_relevance / relevance_count) * 100) if relevance_count > 0 else 0
+        # Получаем активный диалог
+        active_dialog = self.dialog_manager.get_active_dialog(user.id)
         
         stats_text = f"""
 <b>📊 Ваша статистика</b>
 
-<b>Всего вопросов:</b> {total_questions}
-<b>Использовано токенов:</b> {total_tokens}
-<b>Средняя длина ответа:</b> {total_tokens // total_questions if total_questions > 0 else 0} токенов
-<b>Средняя релевантность:</b> {avg_relevance_pct}%
-<b>Активность с:</b> {session.created_at.strftime('%d.%m.%Y %H:%M')}
-<b>Частые источники:</b> {sources_text}
-
-<b>Последние вопросы:</b>
-"""
+<b>Всего диалогов:</b> {total_dialogs}
+<b>Активность с:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}
+        """
         
-        # Добавляем последние 3 вопроса
-        for i, qa in enumerate(session.question_history[-3:], 1):
-            preview = qa['question'][:50] + '...' if len(qa['question']) > 50 else qa['question']
-            stats_text += f"\n{i}. {self._escape_html(preview)}"
+        if active_dialog:
+            stats_text += f"\n<b>Текущая тема:</b> {self._escape_html(active_dialog.topic)}"
         
         await self._safe_reply_text(update, stats_text, parse_mode='HTML')
     
     async def _clear_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик команды /clear - очистка истории"""
         user = update.message.from_user
-        session = self._get_user_session(user.id)
         
-        questions_count = len(session.question_history)
-        session.question_history.clear()
+        # Создаем новый диалог (эффективно очищает историю)
+        dialog = self.dialog_manager.start_new_dialog(user.id, "Очищенная история")
         
-        await update.message.reply_text(f"🗑️ История очищена. Удалено {questions_count} вопросов")
+        message = f"🗑️ История очищена. Начата новая тема: {dialog.topic}"
+        await update.message.reply_text(message)
     
     async def _summarize_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик команды /summarize - суммаризация диалога"""
         user = update.message.from_user
-        session = self._get_user_session(user.id)
         
-        if len(session.question_history) == 0:
-            await update.message.reply_text("📝 История вопросов пуста")
+        dialog = self.dialog_manager.get_active_dialog(user.id)
+        if not dialog or len(dialog.messages) == 0:
+            await update.message.reply_text(self._get_template('errors', 'empty_history'))
             return
         
         # Формируем диалог для суммаризации
         dialog_text = f"Диалог пользователя {user.first_name or user.username or 'Unknown'}:\n\n"
-        for i, qa in enumerate(session.question_history, 1):
-            dialog_text += f"Вопрос {i}: {qa['question']}\n"
-            dialog_text += f"Ответ {i}: {qa['answer'][:300]}...\n\n"
+        for i, msg in enumerate(dialog.messages, 1):
+            role = "Пользователь" if msg.role == 'user' else "Ассистент"
+            dialog_text += f"{role} {i}: {msg.content}\n\n"
         
         # Отправляем сообщение о обработке
-        processing_msg = await update.message.reply_text("📊 Суммаризирую диалог...")
+        processing_msg = await update.message.reply_text(self._get_template('messages', 'summarizing'))
         
         data = self._make_api_request("POST", "/summarize", json={"dialog": dialog_text})
         
         if not data:
             await processing_msg.delete()
-            await update.message.reply_text("❌ Ошибка при суммаризации диалога")
+            await update.message.reply_text(self._get_template('errors', 'summarize_error'))
             return
         
-        summary_text = f"""
-<b>📋 Суммаризация диалога</b>
-
-{self._escape_html(data['summary'])}
-
-<b>Статистика суммаризации:</b>
-• Исходный текст: {data['original_length']} символов
-• Суммаризация: {data['summary_length']} символов
-• Коэффициент сжатия: {data['summary_length']/data['original_length']:.1%}
-        """
+        # Обновляем summary диалога
+        self.dialog_manager.update_summary(user.id, data['summary'])
+        
+        summary_text = self._get_template('summarize', 'template').format(
+            summary=self._escape_html(data['summary']),
+            original_length=data['original_length'],
+            summary_length=data['summary_length'],
+            compression_ratio=f"{data['summary_length']/data['original_length']:.1%}"
+        )
         
         await processing_msg.delete()
         await self._safe_reply_text(update, summary_text, parse_mode='HTML')
@@ -441,32 +521,28 @@ class NeuroConsultantBot:
         """Обработчик команды /rebuild - перестроение базы знаний"""
         # Проверяем права администратора
         if not self._is_admin(update.message.from_user.id):
-            await update.message.reply_text("❌ Эта команда доступна только администраторам")
+            await update.message.reply_text(self._get_template('errors', 'admin_only'))
             return
         
         # Отправляем сообщение о обработке
-        processing_msg = await update.message.reply_text("🔄 Перестраиваю базу знаний...")
+        processing_msg = await update.message.reply_text(self._get_template('messages', 'rebuilding'))
         
         data = self._make_api_request("POST", "/knowledge-base/rebuild")
         
         if not data:
             await processing_msg.delete()
-            await update.message.reply_text("❌ Ошибка при перестроении базы знаний")
+            await update.message.reply_text(self._get_template('errors', 'rebuild_error'))
             return
         
         if data.get('status') == 'success':
-            result_text = f"""
-<b>✅ База знаний перестроена</b>
-
-{self._escape_html(data.get('message', 'Успешно'))}
-<b>Документов в базе:</b> {data.get('documents_count', 0)}
-            """
+            result_text = self._get_template('rebuild', 'success').format(
+                message=self._escape_html(data.get('message', 'Успешно')),
+                documents_count=data.get('documents_count', 0)
+            )
         else:
-            result_text = f"""
-<b>❌ Ошибка перестроения базы</b>
-
-{self._escape_html(data.get('message', 'Неизвестная ошибка'))}
-            """
+            result_text = self._get_template('rebuild', 'error').format(
+                message=self._escape_html(data.get('message', 'Неизвестная ошибка'))
+            )
         
         await processing_msg.delete()
         await self._safe_reply_text(update, result_text, parse_mode='HTML')
@@ -481,7 +557,7 @@ class NeuroConsultantBot:
         if query.data == "rebuild_kb":
             # Проверяем права администратора
             if not self._is_admin(user.id):
-                await query.edit_message_text("❌ Эта операция доступна только администраторам")
+                await query.edit_message_text(self._get_template('errors', 'admin_only'))
                 return
             
             # Показываем подтверждение
@@ -492,46 +568,40 @@ class NeuroConsultantBot:
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await query.edit_message_text(
-                "⚠️ <b>Подтверждение перестроения базы знаний</b>\n\n"
-                "Это действие перестроит векторную базу знаний из исходных документов. "
-                "Процесс может занять несколько минут. Продолжить?",
+                self._get_template('rebuild', 'confirmation'),
                 parse_mode='HTML',
                 reply_markup=reply_markup
             )
         
         elif query.data == "confirm_rebuild":
-            await query.edit_message_text("🔄 Перестраиваю базу знаний...")
+            await query.edit_message_text(self._get_template('messages', 'rebuilding'))
             
             data = self._make_api_request("POST", "/knowledge-base/rebuild")
             
             if data and data.get('status') == 'success':
-                result_text = f"✅ База знаний перестроена\n{data.get('message')}"
+                result_text = self._get_template('messages', 'rebuild_complete').format(
+                    message=data.get('message', '')
+                )
             else:
-                result_text = "❌ Ошибка при перестроении базы знаний"
+                result_text = self._get_template('messages', 'rebuild_failed')
             
             await query.edit_message_text(result_text)
         
         elif query.data == "cancel_rebuild":
-            await query.edit_message_text("❌ Перестроение базы знаний отменено")
+            await query.edit_message_text(self._get_template('messages', 'rebuild_cancelled'))
         
         elif query.data == "show_stats":
             user = query.from_user
-            session = self._get_user_session(user.id)
             
-            total_questions = len(session.question_history)
-            if total_questions == 0:
-                await query.edit_message_text("📊 Вы еще не задавали вопросов")
-                return
-            
-            total_tokens = sum(qa.get('tokens_used', 0) for qa in session.question_history)
+            # Получаем все диалоги пользователя
+            dialogs = self.dialog_manager.get_user_dialogs(user.id)
+            total_dialogs = len(dialogs)
             
             stats_text = f"""
 <b>📊 Ваша статистика</b>
 
-<b>Всего вопросов:</b> {total_questions}
-<b>Использовано токенов:</b> {total_tokens}
-<b>Средняя длина ответа:</b> {total_tokens // total_questions} токенов
-<b>Активность с:</b> {session.created_at.strftime('%d.%m.%Y %H:%M')}
+<b>Всего диалогов:</b> {total_dialogs}
+<b>Активность с:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}
             """
             
             await query.edit_message_text(stats_text, parse_mode='HTML')
@@ -545,61 +615,77 @@ class NeuroConsultantBot:
         # Пропускаем короткие сообщения (возможно, команды)
         if len(question.strip()) < 3:
             await update.message.reply_text(
-                "❓ Вопрос слишком короткий. Пожалуйста, сформулируйте вопрос подробнее.",
+                self._get_template('errors', 'short_question'),
                 reply_to_message_id=update.message.message_id
             )
             return
         
+        # Получаем активный диалог
+        dialog = self.dialog_manager.get_active_dialog(user.id)
+        if not dialog:
+            # Создаем новый диалог если активного нет
+            dialog = self.dialog_manager.start_new_dialog(user.id, "Общий диалог")
+        
+        # Добавляем вопрос пользователя в диалог
+        self.dialog_manager.add_message(user.id, 'user', question)
+        
         # Отправляем сообщение о обработке
-        processing_msg = await update.message.reply_text("🔍 Ищу ответ в документации...")
+        processing_msg = await update.message.reply_text(self._get_template('messages', 'processing'))
+        
+        # Формируем запрос с контекстом
+        request_text = f"Текущий вопрос: {question}"
+        
+        # Добавляем summary предыдущего диалога если есть
+        if dialog.summary:
+            request_text += f"\n\nКонтекст диалога: {dialog.summary}"
         
         # Отправляем вопрос в API
         data = self._make_api_request(
             "POST", 
             "/ask",
             json={
-                "question": question
+                "question": request_text
             }
         )
         
         if not data:
             await processing_msg.delete()
             await update.message.reply_text(
-                "❌ Ошибка при обработке вопроса. Попробуйте позже.",
+                self._get_template('errors', 'api_error'),
                 reply_to_message_id=update.message.message_id
             )
             return
         
-        # Сохраняем в историю
-        session.add_question(question, data['answer'], data['tokens_used'], data.get('sources', []))
+        # Добавляем ответ ассистента в диалог
+        self.dialog_manager.add_message(user.id, 'assistant', data['answer'], data['tokens_used'])
         
-        # Очищаем ответ и источники
-        safe_answer = self._escape_html(data['answer'])
-        
-        # Форматируем ответ с HTML разметкой
-        response_text = f"""
-<b>🤖 Ответ:</b>
-
-{safe_answer}
-        """
-        
-        # Добавляем информацию об источниках если они есть
+        # Формируем секцию с источниками
         sources = data.get('sources', [])
+        sources_list = ""
         if sources:
-            response_text += "\n<b>📚 Источники информации:</b>\n"
+            source_items = []
             for i, source in enumerate(sources[:3], 1):
                 relevance_percent = int((source.get('relevance_score', 0) or 0) * 100)
                 source_name = self._escape_html(source.get('source', 'Неизвестный источник'))
-                response_text += f"\n{i}. 📄 {source_name}"
-                response_text += f" (релевантность: {relevance_percent}%)"
+                source_item = self._get_template('response', 'source_item').format(
+                    index=i,
+                    source=source_name,
+                    relevance=relevance_percent
+                )
+                source_items.append(source_item)
+            
+            sources_list = self._get_template('response', 'sources_section').format(
+                sources_list="\n".join(source_items)
+            )
         
-        response_text += f"""
-
-<b>📊 Статистика запроса:</b>
-• Использовано токенов: {data['tokens_used']}
-• Всего вопросов в сессии: {len(session.question_history)}
-• Источников найдено: {len(sources)}
-        """
+        # Форматируем ответ с HTML разметкой
+        response_text = self._get_template('response', 'template').format(
+            answer=self._escape_html(data['answer']),
+            source_section=sources_list,
+            tokens_used=data['tokens_used'],
+            session_questions=len(dialog.messages),
+            sources_count=len(sources)
+        )
         
         await processing_msg.delete()
         
@@ -643,6 +729,8 @@ class NeuroConsultantBot:
     def run(self):
         """Запуск бота"""
         logger.info(f"Бот запущен. Администраторы: {self.admin_ids}")
+        logger.info(f"Настройки диалогов: {self.dialog_manager.max_messages} сообщений, {self.dialog_manager.max_dialogs} диалогов")
+        logger.info(f"Загружено шаблонов: {len(self.templates)} категорий")
         self.application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 def main():
@@ -664,6 +752,8 @@ def main():
     print(f"API сервер: {API_BASE_URL}")
     print(f"Bot Token: {'установлен' if bot_token else 'отсутствует'}")
     print(f"Администраторы: {bot.admin_ids}")
+    print(f"Настройки диалогов: {bot.dialog_manager.max_messages} сообщений, {bot.dialog_manager.max_dialogs} диалогов")
+    print(f"Шаблоны сообщений: {'загружены' if bot.templates else 'не загружены'}")
     print("Бот запускается...")
     print("=" * 50)
     
