@@ -7,12 +7,13 @@
     "extensions": ["md", "txt", "pdf"],
     "chunk_size": 2500,
     "chunk_overlap": 250,
-    "search_k": 7
+    "search_k": 7,
+    "use_markdown_processing": true
   },
   "gpt": {
     "model": "gpt-4o-mini",
     "max_tokens": 1500,
-    "temperature": 0.1
+    "temperature": 0.2
   },
   "embedding": {
     "model": "text-embedding-ada-002"

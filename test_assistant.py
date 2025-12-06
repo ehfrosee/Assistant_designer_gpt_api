@@ -285,7 +285,7 @@ def main():
         print(f"⚠️ Не удалось получить информацию о базе знаний: {e}")
     
     # Запускаем тестирование
-    tester = AssistantTester()
+    tester = AssistantTester(questions_file='test_questions.txt')
     
     if tester.run_tests():
         # Генерируем отчеты
