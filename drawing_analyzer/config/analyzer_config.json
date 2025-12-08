@@ -1,0 +1,51 @@
+{
+  "analysis_config": {
+    "detect_paper_size": true,
+    "extract_metadata": true,
+    "find_tables": true,
+    "cluster_text_blocks": true,
+    "save_detailed_blocks": true,
+    "max_blocks_per_page": 500,
+    "analysis_depth": "detailed",
+    "save_individual_reports": true,
+    "reports_output_dir": "data/output/individual_reports"
+  },
+  "patterns": {
+    "title_block_keywords": ["title block", "штамп"],
+    "document_type_patterns": {
+      "specification": ["specification", "spec", "спецификация", ".со", "спец"],
+      "drawing": ["drawing", "чертеж", "plan", "план", "чертеж", "чер"],
+      "scheme": ["scheme", "схема", "диаграмма", "сх", "электрическая схема"],
+      "report": ["report", "отчет", "протокол", "акт"],
+      "manual": ["manual", "руководство", "инструкция"]
+    },
+    "metadata_patterns": {
+      "object_name": ["объект[:\\s]+(.+)", "наименование[:\\s]+(.+)", "object[:\\s]+(.+)"],
+      "drawing_number": ["[№nN]\\s*([\\w\\-\\.]+)", "обозначение[:\\s]+(.+)", "number[:\\s]+(.+)"],
+      "scale": ["масштаб[:\\s]+(.+)", "scale[:\\s]+(.+)"],
+      "developer": ["разраб\\.?[:\\s]+(.+)", "исполнитель[:\\s]+(.+)", "developer[:\\s]+(.+)"],
+      "checker": ["пров\\.?[:\\s]+(.+)", "контрол[:\\s]+(.+)", "checker[:\\s]+(.+)"],
+      "company": ["организация[:\\s]+(.+)", "ооо\\s*[«\"](.+?)[»\"]", "company[:\\s]+(.+)"],
+      "date": ["дата[:\\s]+(\\d{2}[\\./]\\d{2}[\\./]\\d{4})", "date[:\\s]+(\\d{2}[\\./]\\d{2}[\\./]\\d{4})"]
+    },
+    "system_patterns": ["ПВ\\d+", "П\\d+", "ШУ\\d+", "С\\d+", "К\\d+"],
+    "standard_patterns": ["ГОСТ\\s*\\d+", "СТ\\s*\\d+", "СП\\s*\\d+", "ISO\\s*\\d+", "IEC\\s*\\d+"],
+    "equipment_keywords": ["оборудование", "устройство", "прибор", "аппарат", "станция"],
+    "table_header_patterns": ["поз\\.", "наименование", "код", "количество", "ед\\. изм", "примечание"],
+    "reference_patterns": ["лист\\s*[№N]?\\s*(\\d+)", "см\\.\\s*лист\\s*(\\d+)", "sheet\\s*(\\d+)"]
+  },
+  "clustering_config": {
+    "vertical_threshold": 20.0,
+    "horizontal_threshold": 50.0,
+    "table_row_threshold": 10.0,
+    "min_table_rows": 2,
+    "min_table_columns": 2
+  },
+  "output_config": {
+    "default_output_file": "data/output/project_analysis.json",
+    "encoding": "utf-8",
+    "indent": 2,
+    "ensure_ascii": false,
+    "compress_output": false
+  }
+}
